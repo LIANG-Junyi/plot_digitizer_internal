@@ -15,8 +15,7 @@ A web application that uses AI vision models to extract numerical data from scie
 ## Requirements
 
 - Python 3.10+
-- An [Anthropic API key](https://console.anthropic.com/)
-- (Optional) A DashScope API key for standard precision mode
+- An [Anthropic API key] or A DashScope API key for
 
 ## Setup
 
