@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plot Digitizer (Internal)</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; background: #f7f8fa; color: #1f2430; }
+  header { padding: 18px 24px; background: #fff; border-bottom: 1px solid #e5e7eb; display: flex; align-items: center; gap: 10px; }
+  header h1 { font-size: 1.05rem; margin: 0; }
+  main { max-width: 920px; margin: 28px auto; padding: 0 16px; display: grid; gap: 20px; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 20px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+  .tab-btn { padding: 8px 16px; border-radius: 8px; border: 1px solid #e5e7eb; background: #fff; cursor: pointer; font-size: .85rem; }
+  .tab-btn.active { background: #4f46e5; color: #fff; border-color: #4f46e5; }
+  .precision-row { display: flex; gap: 16px; margin-bottom: 14px; font-size: .85rem; }
+  .precision-row label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  #drop-zone { border: 2px dashed #c7d2fe; border-radius: 10px; padding: 36px 20px; text-align: center; cursor: pointer; transition: border-color .15s; }
+  #drop-zone.dragover { border-color: #4f46e5; background: #f5f5ff; }
+  #drop-zone p { margin: 4px 0; color: #6b7280; font-size: .85rem; }
+  #file-name { font-size: .82rem; color: #374151; margin-top: 8px; min-height: 1.2em; }
+  button.primary { margin-top: 14px; padding: 10px 20px; border: none; border-radius: 8px; background: #4f46e5; color: #fff; font-size: .9rem; cursor: pointer; }
+  button.primary:disabled { background: #c7c9d9; cursor: not-allowed; }
+  button.secondary { padding: 8px 16px; border: 1px solid #d1d5db; border-radius: 8px; background: #fff; cursor: pointer; font-size: .85rem; }
+  .status { margin-top: 12px; font-size: .85rem; }
+  .status.error { color: #dc2626; }
+  .status.ok { color: #16a34a; }
+  #progress-wrap { display: none; margin-top: 10px; height: 6px; background: #e5e7eb; border-radius: 3px; overflow: hidden; }
+  #progress-bar { height: 100%; width: 0%; background: #4f46e5; transition: width .3s; }
+  #result-card .head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  #result-title { font-size: 1rem; font-weight: 600; margin: 0; }
+  table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #f0f1f4; }
+  th { color: #6b7280; font-weight: 600; }
+  .meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 18px; font-size: .82rem; }
+  .meta-row { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; border-bottom: 1px solid #f5f5f7; }
+  .meta-key { color: #6b7280; }
+  .chart-panel { border: 1px solid #e5e7eb; border-radius: 8px; margin-top: 10px; }
+  .chart-panel summary { padding: 10px 14px; cursor: pointer; font-size: .85rem; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📊 Plot Digitizer <span style="color:#9ca3af;font-weight:400">— internal build</span></h1>
+</header>
+
+<main>
+  <div class="card">
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="image" onclick="switchTab('image')">Image</button>
+      <button class="tab-btn" data-tab="pdf" onclick="switchTab('pdf')">PDF</button>
+    </div>
+
+    <div class="precision-row">
+      <label><input type="radio" name="precision" value="standard"> Standard Quality (fast, Qwen)</label>
+      <label><input type="radio" name="precision" value="high" checked> Improved Quality (accurate, Claude)</label>
+    </div>
+
+    <div id="drop-zone" ondragover="onDrag(event,true)" ondragleave="onDrag(event,false)" ondrop="onDrop(event)" onclick="document.getElementById('file-input').click()">
+      <p style="font-size:1.4rem">📁</p>
+      <p>Drag & drop a file here, or click to browse</p>
+      <p id="drop-sub" style="color:#9ca3af">PNG, JPG, GIF, WEBP</p>
+      <p id="file-name"></p>
+    </div>
+    <input type="file" id="file-input" class="hidden" accept="image/*" onchange="onFileSelect(event)">
+
+    <button class="primary" id="analyze-btn" disabled onclick="runAnalyze()">Analyze</button>
+    <div id="progress-wrap"><div id="progress-bar"></div></div>
+    <div id="status" class="status"></div>
+  </div>
+
+  <div class="card" id="result-card" style="display:none">
+    <div class="head">
+      <h2 id="result-title"></h2>
+      <button class="secondary" onclick="runExport()">⬇ Download CSV</button>
+    </div>
+    <div id="result-body"></div>
+  </div>
+</main>
+
+<script>
+const state = { tab: 'image', file: null, lastResult: null,
+  precision: document.querySelector('input[name=precision]:checked')?.value || 'high' };
+
+document.querySelectorAll('input[name=precision]').forEach(r =>
+  r.addEventListener('change', () => { state.precision = r.value; }));
+
+// ---- Tabs ----
+function switchTab(tab) {
+  state.tab = tab;
+  state.file = null; state.lastResult = null;
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  document.getElementById('file-name').textContent = '';
+  document.getElementById('analyze-btn').disabled = true;
+  document.getElementById('result-card').style.display = 'none';
+  document.getElementById('status').textContent = '';
+  document.getElementById('status').className = 'status';
+  document.getElementById('progress-wrap').style.display = 'none';
+
+  const inp = document.getElementById('file-input');
+  inp.accept = tab === 'image' ? 'image/*' : 'application/pdf';
+  document.getElementById('drop-sub').textContent = tab === 'image' ? 'PNG, JPG, GIF, WEBP' : 'PDF — max 80 pages';
+}
+
+// ---- File handling ----
+function onDrag(e, over) { e.preventDefault(); document.getElementById('drop-zone').classList.toggle('dragover', over); }
+function onDrop(e) {
+  e.preventDefault(); document.getElementById('drop-zone').classList.remove('dragover');
+  if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
+}
+function onFileSelect(e) { if (e.target.files[0]) setFile(e.target.files[0]); }
+function setFile(file) {
+  state.file = file;
+  document.getElementById('file-name').textContent = `Selected: ${file.name}`;
+  document.getElementById('analyze-btn').disabled = false;
+}
+
+// ---- Analyze ----
+async function runAnalyze() {
+  if (!state.file) return;
+
+  const statusEl = document.getElementById('status');
+  const btn = document.getElementById('analyze-btn');
+  const progressWrap = document.getElementById('progress-wrap');
+
+  btn.disabled = true;
+  statusEl.className = 'status';
+  statusEl.textContent = state.tab === 'image' ? 'Analyzing chart…' : 'Analyzing PDF (this can take a while)…';
+  document.getElementById('result-card').style.display = 'none';
+  progressWrap.style.display = state.tab === 'pdf' ? '' : 'none';
+
+  const form = new FormData();
+  form.append('file', state.file);
+
+  try {
+    const endpoint = `${state.tab === 'image' ? '/analyze/image' : '/analyze/pdf'}?precision=${state.precision}`;
+    const res = await fetch(endpoint, { method: 'POST', body: form });
+    const data = await res.json();
+
+    progressWrap.style.display = 'none';
+
+    if (!res.ok) {
+      statusEl.className = 'status error';
+      statusEl.textContent = 'Error: ' + (data.detail || res.statusText);
+      btn.disabled = false;
+      return;
+    }
+
+    state.lastResult = data;
+    statusEl.className = 'status ok';
+    statusEl.textContent = '✓ Done';
+    renderResult(data);
+    btn.disabled = false;
+  } catch (e) {
+    progressWrap.style.display = 'none';
+    statusEl.className = 'status error';
+    statusEl.textContent = 'Network error: ' + e.message;
+    btn.disabled = false;
+  }
+}
+
+// ---- Render results ----
+function renderResult(data) {
+  const card = document.getElementById('result-card');
+  const body = document.getElementById('result-body');
+  card.style.display = '';
+  if (state.tab === 'image') {
+    document.getElementById('result-title').textContent = data.figure_id || 'Chart Result';
+    body.innerHTML = renderChart(data);
+  } else {
+    document.getElementById('result-title').textContent = 'Paper Analysis';
+    let html = '';
+    if (data.metadata) html += renderMetadata(data.metadata);
+    if (data.charts && data.charts.length) {
+      html += `<h3 style="margin:18px 0 10px;font-size:.93rem">Charts Found (${data.charts.length})</h3>`;
+      data.charts.forEach(c => { html += renderChartPanel(c); });
+    } else {
+      html += `<p style="color:#888;margin-top:14px">No charts detected in this PDF.</p>`;
+    }
+    body.innerHTML = html;
+  }
+}
+
+function renderMetadata(meta) {
+  const labels = { title:'Title', authors:'Authors', journal:'Journal', year:'Year',
+    research_location:'Location', latitude:'Latitude', longitude:'Longitude', altitude_m:'Altitude (m)',
+    crop_or_species:'Crop/Species', experimental_design:'Exp. Design',
+    n_replicates:'Replicates', n_treatments:'Treatments',
+    treatment_start:'Treatment Start', treatment_end:'Treatment End',
+    data_collection_dates:'Data Collection', soil_type:'Soil Type', notes:'Notes' };
+  const rows = Object.entries(labels).filter(([k]) => meta[k] != null)
+    .map(([k, l]) => `<div class="meta-row"><span class="meta-key">${l}</span><span class="meta-val">${esc(meta[k])}</span></div>`).join('');
+  return `<div class="meta-grid">${rows}</div>`;
+}
+
+function renderChart(chart) {
+  const info = [
+    chart.chart_type && `Type: ${esc(chart.chart_type)}`,
+    chart.x_label && `X: ${esc(chart.x_label)}`,
+    chart.y_label && `Y: ${esc(chart.y_label)}`,
+    chart.unit && `Unit: ${esc(chart.unit)}`,
+    chart.caption && `Caption: ${esc(chart.caption)}`,
+  ].filter(Boolean).join(' | ');
+  let t = `<div style="font-size:.78rem;color:#888;margin-bottom:8px">${info}</div>
+    <table><thead><tr><th>Series</th><th>X</th><th>Mean/Y</th><th>Error+</th><th>Error−</th></tr></thead><tbody>`;
+  (chart.series||[]).forEach(s => (s.data||[]).forEach(pt => {
+    t += `<tr><td>${esc(s.name)}</td><td>${esc(pt.x)}</td><td>${esc(pt.mean)}</td><td>${esc(pt.error_plus)}</td><td>${esc(pt.error_minus)}</td></tr>`;
+  }));
+  t += '</tbody></table>';
+  if (chart.notes) t += `<div style="font-size:.76rem;color:#888;margin-top:6px">Note: ${esc(chart.notes)}</div>`;
+  return t;
+}
+
+function renderChartPanel(chart) {
+  return `<details class="chart-panel">
+    <summary>${esc(chart.figure_id)} <span style="font-weight:400;color:#888;font-size:.78rem">${esc(chart.chart_type)}</span></summary>
+    <div style="padding:12px 14px">${renderChart(chart)}</div>
+  </details>`;
+}
+
+function esc(v) {
+  if (v == null) return '—';
+  return String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ---- CSV export (client-side) ----
+function csvCell(v) {
+  if (v == null) return '';
+  let s = String(v);
+  if (s.length > 0 && '=+-@\t\r'.indexOf(s[0]) !== -1) s = "'" + s;
+  return (s.includes(',') || s.includes('"') || s.includes('\n')) ? '"' + s.replace(/"/g,'""') + '"' : s;
+}
+function csvRow(...cells) { return cells.map(csvCell).join(','); }
+
+function chartToCsv(chart) {
+  const lines = [
+    csvRow('figure_id', chart.figure_id), csvRow('chart_type', chart.chart_type),
+    chart.x_label ? csvRow('x_label', chart.x_label) : null,
+    chart.y_label ? csvRow('y_label', chart.y_label) : null,
+    chart.unit ? csvRow('unit', chart.unit) : null,
+    chart.caption ? csvRow('caption', chart.caption) : null,
+    chart.notes ? csvRow('notes', chart.notes) : null,
+    '', csvRow('series','x','mean','error_plus','error_minus'),
+  ].filter(l => l !== null);
+  (chart.series||[]).forEach(s => (s.data||[]).forEach(pt =>
+    lines.push(csvRow(s.name, pt.x, pt.mean, pt.error_plus, pt.error_minus))));
+  return lines.join('\r\n');
+}
+
+function paperToCsv(result) {
+  const lines = ['=== PAPER METADATA ===', csvRow('field','value')];
+  Object.entries(result.metadata||{}).forEach(([k,v]) => { if (v!=null) lines.push(csvRow(k,v)); });
+  lines.push('', '=== CHART DATA ===',
+    csvRow('figure_id','chart_type','x_label','y_label','unit','series','x','mean','error_plus','error_minus'));
+  (result.charts||[]).forEach(c => (c.series||[]).forEach(s => (s.data||[]).forEach(pt =>
+    lines.push(csvRow(c.figure_id, c.chart_type, c.x_label, c.y_label, c.unit, s.name, pt.x, pt.mean, pt.error_plus, pt.error_minus)))));
+  return lines.join('\r\n');
+}
+
+function runExport() {
+  if (!state.lastResult) return;
+  const csv = state.tab === 'image' ? chartToCsv(state.lastResult) : paperToCsv(state.lastResult);
+  const name = state.tab === 'image'
+    ? `${(state.lastResult.figure_id||'chart').replace(/\s+/g,'_')}.csv`
+    : `${(state.lastResult.metadata?.title||'paper').slice(0,40).replace(/[\s/]+/g,'_')}_data.csv`;
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name; a.click();
+  URL.revokeObjectURL(url);
+}
+</script>
+</body>
+</html>
